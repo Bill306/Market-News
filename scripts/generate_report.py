@@ -1,28 +1,90 @@
-"""Generate daily market news report using Claude Agent SDK with WebSearch."""
+"""Generate daily market news report using DeepSeek (Anthropic-compatible) + DuckDuckGo Search."""
 
-import asyncio
 import os
 import pathlib
 from datetime import datetime, timezone, timedelta
 
-from claude_agent_sdk import (
-    query,
-    ClaudeAgentOptions,
-    AssistantMessage,
-    ResultMessage,
-    TextBlock,
-)
+import anthropic
+from duckduckgo_search import DDGS
+
+# 10 search queries from SKILL.md
+SEARCH_QUERIES = [
+    "US stock market today S&P 500 Dow Nasdaq",
+    "US stock market news today",
+    "Treasury yields today 10 year bond",
+    "US dollar index gold oil price today",
+    "stock market sector performance today",
+    "Federal Reserve news economic data today",
+    "economic calendar this week",
+    "VIX fear greed index market sentiment",
+    "China A shares Shanghai Shenzhen stock market today",
+    "Bitcoin crypto market today",
+]
 
 
-async def main():
+def run_searches() -> str:
+    """Execute all 10 web searches and return combined results."""
+    ddgs = DDGS()
+    all_results = []
+
+    for i, query in enumerate(SEARCH_QUERIES, 1):
+        print(f"  [{i}/10] Searching: {query}")
+        try:
+            results = ddgs.text(query, max_results=5)
+            section = f"### Search {i}: {query}\n"
+            for r in results:
+                section += f"- **{r['title']}**: {r['body']}\n"
+            all_results.append(section)
+        except Exception as e:
+            all_results.append(f"### Search {i}: {query}\n⚠️ Search failed: {e}\n")
+
+    return "\n".join(all_results)
+
+
+def generate_report(system_prompt: str, search_results: str, today_cn: str) -> str:
+    """Call DeepSeek API (Anthropic-compatible) to synthesize the market report."""
+    client = anthropic.Anthropic(
+        auth_token=os.environ["ANTHROPIC_AUTH_TOKEN"],
+        base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic"),
+    )
+
+    model = os.environ.get("ANTHROPIC_MODEL", "deepseek-chat")
+
+    user_message = (
+        f"今天是{today_cn}。\n\n"
+        f"以下是今日通过网络搜索获取的市场数据：\n\n"
+        f"{search_results}\n\n"
+        f"请根据以上数据，按照指令生成今日每日市场简报。"
+    )
+
+    print(f"Calling DeepSeek API (model={model})...")
+    response = client.messages.create(
+        model=model,
+        max_tokens=4096,
+        system=system_prompt,
+        messages=[
+            {"role": "user", "content": user_message},
+        ],
+    )
+
+    # Extract text from response content blocks
+    parts = []
+    for block in response.content:
+        if block.type == "text":
+            parts.append(block.text)
+
+    return "\n".join(parts)
+
+
+def main():
     # Read SKILL.md as the system prompt
     skill_path = pathlib.Path(__file__).parent.parent / "skill" / "SKILL.md"
     skill_content = skill_path.read_text(encoding="utf-8")
 
-    # Strip YAML frontmatter (between --- delimiters) for cleaner system prompt
+    # Strip YAML frontmatter (between --- delimiters)
     if skill_content.startswith("---"):
         end = skill_content.index("---", 3)
-        skill_content = skill_content[end + 3 :].strip()
+        skill_content = skill_content[end + 3:].strip()
 
     # Beijing time date
     cst = timezone(timedelta(hours=8))
@@ -32,34 +94,15 @@ async def main():
 
     print(f"Generating market report for {today_cn} ({date_str})...")
 
-    # Collect all text output from the agent
-    report_parts = []
-    result_info = None
+    # Step 1: Web searches
+    print("Step 1: Running web searches...")
+    search_results = run_searches()
 
-    async for message in query(
-        prompt=f"今天是{today_cn}。请按照指令生成今日每日市场简报。",
-        options=ClaudeAgentOptions(
-            system_prompt=skill_content,
-            allowed_tools=["WebSearch"],
-            model="claude-sonnet-4-20250514",
-            max_turns=15,
-            permission_mode="bypassPermissions",
-        ),
-    ):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    report_parts.append(block.text)
-        elif isinstance(message, ResultMessage):
-            result_info = message
+    # Step 2: Synthesize report via DeepSeek
+    print("Step 2: Synthesizing report...")
+    report = generate_report(skill_content, search_results, today_cn)
 
-    if result_info and result_info.is_error:
-        print(f"Error: Agent returned error - {result_info.subtype}")
-        raise SystemExit(1)
-
-    report = "\n".join(report_parts)
-
-    if not report.strip():
+    if not report or not report.strip():
         print("Error: Generated report is empty")
         raise SystemExit(1)
 
@@ -77,13 +120,8 @@ async def main():
             f.write(f"report_file=reports/{date_str}.md\n")
             f.write(f"report_date={today_cn}\n")
 
-    if result_info:
-        cost = getattr(result_info, "total_cost_usd", "N/A")
-        turns = getattr(result_info, "num_turns", "N/A")
-        print(f"Cost: ${cost}, Turns: {turns}")
-
     print("Done.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
