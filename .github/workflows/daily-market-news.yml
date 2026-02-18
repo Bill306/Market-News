@@ -1,0 +1,52 @@
+name: Daily Market News Briefing
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # UTC 0:00 = Beijing time 8:00
+  workflow_dispatch:        # Manual trigger for testing
+
+permissions:
+  contents: write           # Allow pushing reports to repo
+
+jobs:
+  generate-and-deliver:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate market report
+        id: report
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/generate_report.py
+
+      - name: Send email report
+        uses: dawidd6/action-send-mail@v4
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "Daily Market Briefing — ${{ steps.report.outputs.report_date }}"
+          to: ${{ secrets.MAIL_TO }}
+          from: "Market News Bot <${{ secrets.MAIL_USERNAME }}>"
+          html_body: file://${{ steps.report.outputs.report_file }}
+          convert_markdown: true
+          content_type: text/html
+
+      - name: Commit report to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          git commit -m "Daily market report — $(date -u +%Y-%m-%d)" || true
+          git push
