@@ -1,2 +1,2 @@
 anthropic>=0.50.0
-duckduckgo_search>=7.0.0
+ddgs>=8.0.0

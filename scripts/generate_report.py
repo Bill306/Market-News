@@ -2,10 +2,16 @@
 
 import os
 import pathlib
+import time
 from datetime import datetime, timezone, timedelta
 
 import anthropic
-from duckduckgo_search import DDGS
+
+# Support both old and new package names
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 
 # 10 search queries from SKILL.md
 SEARCH_QUERIES = [
@@ -21,6 +27,13 @@ SEARCH_QUERIES = [
     "Bitcoin crypto market today",
 ]
 
+# Delay between searches to avoid rate limiting (seconds)
+SEARCH_DELAY = 2
+# Number of retries per search query
+MAX_RETRIES = 2
+# Delay between retries (seconds)
+RETRY_DELAY = 5
+
 
 def run_searches() -> str:
     """Execute all 10 web searches and return combined results."""
@@ -29,14 +42,35 @@ def run_searches() -> str:
 
     for i, query in enumerate(SEARCH_QUERIES, 1):
         print(f"  [{i}/10] Searching: {query}")
-        try:
-            results = ddgs.text(query, max_results=5)
-            section = f"### Search {i}: {query}\n"
-            for r in results:
-                section += f"- **{r['title']}**: {r['body']}\n"
+
+        section = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                results = ddgs.text(query, max_results=5)
+                if results:
+                    section = f"### Search {i}: {query}\n"
+                    for r in results:
+                        section += f"- **{r['title']}**: {r['body']}\n"
+                    break
+                else:
+                    print(f"    Attempt {attempt}: empty results, retrying...")
+            except Exception as e:
+                print(f"    Attempt {attempt} failed: {e}")
+
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+
+        if section is None:
+            all_results.append(
+                f"### Search {i}: {query}\n"
+                f"No results returned after {MAX_RETRIES} attempts.\n"
+            )
+        else:
             all_results.append(section)
-        except Exception as e:
-            all_results.append(f"### Search {i}: {query}\n⚠️ Search failed: {e}\n")
+
+        # Delay between queries to avoid rate limiting
+        if i < len(SEARCH_QUERIES):
+            time.sleep(SEARCH_DELAY)
 
     return "\n".join(all_results)
 
