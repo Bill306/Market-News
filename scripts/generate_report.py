@@ -75,7 +75,57 @@ def run_searches() -> str:
     return "\n".join(all_results)
 
 
-def generate_report(system_prompt: str, search_results: str, today_cn: str) -> str:
+# Price data comes from Yahoo Finance, not from search snippets.
+# (label, ticker, unit) — unit "yield" means the quote is a percentage yield.
+MARKET_TICKERS = [
+    ("标普500 (SPX)", "^GSPC", "index"),
+    ("道琼斯 (DJI)", "^DJI", "index"),
+    ("纳斯达克 (IXIC)", "^IXIC", "index"),
+    ("罗素2000 (RUT)", "^RUT", "index"),
+    ("美10年期国债收益率", "^TNX", "yield"),
+    ("美元指数 (DXY)", "DX-Y.NYB", "index"),
+    ("黄金期货 (GC)", "GC=F", "usd"),
+    ("WTI原油期货 (CL)", "CL=F", "usd"),
+    ("比特币 (BTC)", "BTC-USD", "usd"),
+    ("VIX波动率指数", "^VIX", "index"),
+    ("上证指数", "000001.SS", "index"),
+    ("深证成指", "399001.SZ", "index"),
+]
+
+
+def fetch_market_data() -> str:
+    """Fetch latest close and change for each ticker; returns a Markdown table.
+
+    Rows that fail are marked as unavailable so the model never invents them.
+    """
+    import yfinance as yf
+
+    rows = ["| 资产 | 最新价 | 涨跌 | 涨跌幅 | 数据日期 |", "|---|---|---|---|---|"]
+    ok = 0
+    for label, ticker, unit in MARKET_TICKERS:
+        try:
+            hist = yf.Ticker(ticker).history(period="7d", auto_adjust=False)["Close"].dropna()
+            if len(hist) < 2:
+                raise ValueError("not enough history")
+            last, prev = float(hist.iloc[-1]), float(hist.iloc[-2])
+            date = hist.index[-1].strftime("%Y-%m-%d")
+            pct = (last / prev - 1) * 100
+            if unit == "yield":
+                rows.append(f"| {label} | {last:.3f}% | {(last - prev) * 100:+.1f}bp | — | {date} |")
+            else:
+                prefix = "$" if unit == "usd" else ""
+                rows.append(
+                    f"| {label} | {prefix}{last:,.2f} | {last - prev:+,.2f} | {pct:+.2f}% | {date} |"
+                )
+            ok += 1
+        except Exception as e:  # network / delisted / empty
+            print(f"    {ticker} failed: {e}")
+            rows.append(f"| {label} | ⚠️ 数据暂不可用 | — | — | — |")
+    print(f"  Market data: {ok}/{len(MARKET_TICKERS)} tickers fetched")
+    return "\n".join(rows)
+
+
+def generate_report(system_prompt: str, search_results: str, today_cn: str, market_data: str = "") -> str:
     """Call DeepSeek API (Anthropic-compatible) to synthesize the market report."""
     client = anthropic.Anthropic(
         auth_token=os.environ["ANTHROPIC_AUTH_TOKEN"],
@@ -86,7 +136,12 @@ def generate_report(system_prompt: str, search_results: str, today_cn: str) -> s
 
     user_message = (
         f"今天是{today_cn}。\n\n"
-        f"以下是今日通过网络搜索获取的市场数据：\n\n"
+        f"## 行情数据（来自 Yahoo Finance，权威来源）\n\n"
+        f"{market_data}\n\n"
+        f"指数、利率、汇率、商品、加密货币、VIX、A股的数字必须直接使用上表，"
+        f"不得用搜索摘要中的数字替换或补充。上表标为不可用的项目，报告中也标为不可用。"
+        f"若数据日期早于今天，说明为上一交易日数据。\n\n"
+        f"## 新闻与背景（来自网络搜索，用于要闻、板块、日程和解读）\n\n"
         f"{search_results}\n\n"
         f"请根据以上数据，按照指令生成今日每日市场简报。"
     )
@@ -132,9 +187,13 @@ def main():
     print("Step 1: Running web searches...")
     search_results = run_searches()
 
-    # Step 2: Synthesize report via DeepSeek
-    print("Step 2: Synthesizing report...")
-    report = generate_report(skill_content, search_results, today_cn)
+    # Step 2: Prices from Yahoo Finance
+    print("Step 2: Fetching market data...")
+    market_data = fetch_market_data()
+
+    # Step 3: Synthesize report via DeepSeek
+    print("Step 3: Synthesizing report...")
+    report = generate_report(skill_content, search_results, today_cn, market_data)
 
     if not report or not report.strip():
         print("Error: Generated report is empty")
